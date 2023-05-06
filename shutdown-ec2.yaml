@@ -1,0 +1,76 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation template to shutdown any EC2 in select regions after office hours
+
+Resources:
+
+  LambdaServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-StopEc2LambdaServiceRole'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+      Path: /
+      Policies:
+        - PolicyName: LambdaFunctionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  StopEc2LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.10
+      Role: !GetAtt LambdaServiceRole.Arn
+      Timeout: 5
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          import boto3
+
+          def lambda_handler(event, context):
+              awsregion = ['ca-central-1','us-east-1','us-east-2','us-west-1','us-west-2']
+
+              for aws_reg in awsregion:
+                  ec2 = boto3.resource('ec2', region_name=aws_reg)
+                  instances = ec2.instances.filter(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+                  for instance in instances:
+                      ec2.instances.filter(InstanceIds=[instance.id]).stop()
+                      print("Instance ID {} in {} is stopped.".format(instance.id,aws_reg))
+      Description: Lambda function to stop any running EC2 instances.
+      TracingConfig:
+        Mode: Active
+
+  StopScheduleEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Event rule to trigger the lambda function
+      Name: !Sub '${AWS::StackName}-stop-schedule'
+      ScheduleExpression: "cron(0 23 ? * * *)" # Time is in UTC. Run every 5PM EST (UTC-5)
+      Targets:
+        - Arn: !GetAtt StopEc2LambdaFunction.Arn
+          Id: !Ref StopEc2LambdaFunction
+
+  LambdaSchedulerPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StopEc2LambdaFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !GetAtt StopScheduleEventRule.Arn
